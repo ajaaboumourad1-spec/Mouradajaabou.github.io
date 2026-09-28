@@ -212,13 +212,16 @@ def main() -> None:
             time.sleep(ATTESA_TRA_TENTATIVI)
 
     print("3/4 Genero la voce...")
-    crea_short.genera_voce(testo, crea_short.FILE_VOCE)
+    parole = crea_short.genera_voce(testo, crea_short.FILE_VOCE)
+    file_srt = None
+    if crea_short.SOTTOTITOLI and crea_short.scrivi_sottotitoli(parole, crea_short.FILE_SOTTOTITOLI):
+        file_srt = crea_short.FILE_SOTTOTITOLI
 
     print("4/4 Monto il video...")
     CARTELLA_VIDEO.mkdir(exist_ok=True)
     file_video = CARTELLA_VIDEO / nome_file(argomento)
     media = crea_short.trova_media(crea_short.CARTELLA_IMMAGINI)
-    crea_short.monta_video(media, crea_short.FILE_VOCE, file_video)
+    crea_short.monta_video(media, crea_short.FILE_VOCE, file_video, file_srt)
     print(f"Fatto: {file_video}")
 
 
