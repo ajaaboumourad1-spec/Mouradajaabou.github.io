@@ -27,7 +27,8 @@ from datetime import datetime
 
 import crea_short
 
-MODELLO_GEMINI = "gemini-2.5-flash"
+MODELLO_GEMINI = ""             # vuoto = sceglie da solo il modello Flash migliore disponibile
+MAX_MODELLI_DA_PROVARE = 6
 NUMERO_IMMAGINI = 4
 TENTATIVI_IMMAGINE = 3
 ATTESA_TRA_TENTATIVI = 20       # secondi: Pollinations senza chiave accetta circa 1 richiesta ogni 15 s
@@ -45,35 +46,90 @@ Rispondi SOLO con un oggetto JSON con questi campi:
 """
 
 
+API_GEMINI = "https://generativelanguage.googleapis.com/v1beta"
+PAROLE_ESCLUSE = ("image", "tts", "audio", "live", "embedding", "vision", "learnlm", "robotics", "computer-use")
+
+
+def modelli_disponibili(chiave: str) -> list[str]:
+    """Chiede a Google quali modelli Flash di testo può usare questa chiave, dal più nuovo al più vecchio."""
+    richiesta = urllib.request.Request(f"{API_GEMINI}/models?pageSize=1000", headers={"x-goog-api-key": chiave})
+    try:
+        with urllib.request.urlopen(richiesta, timeout=30) as risposta:
+            elenco = json.load(risposta).get("models", [])
+    except urllib.error.HTTPError as errore:
+        if errore.code in (400, 401, 403):
+            sys.exit("Gemini: la chiave GEMINI_API_KEY non è valida. Creane una nuova su "
+                     "https://aistudio.google.com/apikey")
+        sys.exit(f"Gemini: errore {errore.code} nel leggere l'elenco dei modelli.")
+    except urllib.error.URLError as errore:
+        sys.exit(f"Gemini: impossibile collegarsi ({errore.reason}). Controlla internet.")
+
+    nomi = []
+    for modello in elenco:
+        nome = modello.get("name", "").removeprefix("models/")
+        if ("generateContent" in modello.get("supportedGenerationMethods", [])
+                and "flash" in nome and not any(parola in nome for parola in PAROLE_ESCLUSE)):
+            nomi.append(nome)
+
+    def priorita(nome: str) -> tuple:
+        versione = re.search(r"gemini-(\d+(?:\.\d+)?)", nome)
+        sperimentale = any(parola in nome for parola in ("preview", "exp", "latest"))
+        # prima i modelli stabili, poi i più nuovi, poi Flash normale prima di Flash-Lite
+        return (sperimentale, -float(versione.group(1)) if versione else 0.0, "lite" in nome, nome)
+
+    return sorted(nomi, key=priorita)
+
+
+def chiama_gemini(modello: str, corpo: dict, chiave: str) -> dict:
+    richiesta = urllib.request.Request(
+        f"{API_GEMINI}/models/{modello}:generateContent",
+        data=json.dumps(corpo).encode("utf-8"),
+        headers={"Content-Type": "application/json", "x-goog-api-key": chiave},
+    )
+    with urllib.request.urlopen(richiesta, timeout=90) as risposta:
+        return json.load(risposta)
+
+
 def chiedi_a_gemini(argomento: str, chiave: str) -> tuple[str, list[str]]:
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/{MODELLO_GEMINI}:generateContent"
     corpo = {
         "contents": [{"parts": [{"text": PROMPT_GEMINI.format(argomento=argomento, n=NUMERO_IMMAGINI)}]}],
         "generationConfig": {"responseMimeType": "application/json"},
     }
-    richiesta = urllib.request.Request(
-        url,
-        data=json.dumps(corpo).encode("utf-8"),
-        headers={"Content-Type": "application/json", "x-goog-api-key": chiave},
-    )
-    try:
-        with urllib.request.urlopen(richiesta, timeout=60) as risposta:
-            dati = json.load(risposta)
-    except urllib.error.HTTPError as errore:
-        dettaglio = errore.read().decode("utf-8", errors="replace")[:500]
-        if errore.code == 429:
-            sys.exit("Gemini: limite gratuito raggiunto per oggi o per questo minuto. Riprova più tardi.")
-        if errore.code == 404:
-            sys.exit(f"Gemini: modello '{MODELLO_GEMINI}' non trovato. Cambia MODELLO_GEMINI in automatico.py.")
-        sys.exit(f"Gemini: errore {errore.code}. Controlla la chiave GEMINI_API_KEY.\n{dettaglio}")
-    except urllib.error.URLError as errore:
-        sys.exit(f"Gemini: impossibile collegarsi ({errore.reason}). Controlla internet.")
+    candidati = [MODELLO_GEMINI] if MODELLO_GEMINI else []
+    candidati += [m for m in modelli_disponibili(chiave) if m not in candidati]
+    if not candidati:
+        sys.exit("Gemini: nessun modello Flash disponibile per questa chiave.")
+
+    dati = None
+    limite_raggiunto = False
+    for modello in candidati[:MAX_MODELLI_DA_PROVARE]:
+        try:
+            dati = chiama_gemini(modello, corpo, chiave)
+            print(f"   modello usato: {modello}")
+            break
+        except urllib.error.HTTPError as errore:
+            dettaglio = errore.read().decode("utf-8", errors="replace")[:300]
+            if errore.code in (404, 429):
+                # 404: modello ritirato; 429: limite gratuito finito o modello non incluso nel piano gratuito
+                limite_raggiunto |= errore.code == 429
+                print(f"   {modello} non disponibile (errore {errore.code}), provo il prossimo...")
+                continue
+            if errore.code in (400, 401, 403) and "API key" in dettaglio:
+                sys.exit("Gemini: la chiave GEMINI_API_KEY non è valida.")
+            sys.exit(f"Gemini: errore {errore.code} con il modello {modello}.\n{dettaglio}")
+        except urllib.error.URLError as errore:
+            sys.exit(f"Gemini: impossibile collegarsi ({errore.reason}). Controlla internet.")
+    if dati is None:
+        if limite_raggiunto:
+            sys.exit("Gemini: limite gratuito raggiunto su tutti i modelli provati. Riprova tra qualche minuto "
+                     "o domani.")
+        sys.exit("Gemini: nessuno dei modelli provati ha funzionato.")
 
     try:
         contenuto = json.loads(dati["candidates"][0]["content"]["parts"][0]["text"])
         testo = contenuto["testo"].strip()
         immagini = [str(d).strip() for d in contenuto["immagini"]][:NUMERO_IMMAGINI]
-    except (KeyError, IndexError, TypeError, json.JSONDecodeError):
+    except (KeyError, IndexError, TypeError, AttributeError, json.JSONDecodeError):
         sys.exit(f"Gemini ha risposto in un formato inatteso. Riprova.\n{json.dumps(dati)[:500]}")
     if not testo or len(immagini) < NUMERO_IMMAGINI:
         sys.exit("Gemini ha restituito un testo vuoto o meno immagini del previsto. Riprova.")
