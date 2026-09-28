@@ -44,6 +44,23 @@ Se hai già un audio (per esempio la tua voce registrata), puoi usarlo al posto 
 python crea_short.py --audio mia_voce.mp3
 ```
 
+## Versione automatica (Gemini + Pollinations, gratis)
+
+```bash
+setx GEMINI_API_KEY "la-tua-chiave"      # una volta sola, poi riapri il terminale
+python automatico.py "argomento del video"
+```
+Il video finisce in `video/`. Chiave gratuita: <https://aistudio.google.com/apikey>.
+
+## Strada ibrida: una clip animata + immagini
+
+1. Crea una clip **verticale 9:16** di 5–8 secondi nell'app Gemini e salvala come `immagini/1.mp4`.
+2. Lancia `python automatico.py "argomento"` (genera solo le immagini 2, 3, 4)
+   oppure metti tu le immagini `2.jpg`, `3.jpg`, `4.jpg` e lancia `python crea_short.py`.
+
+Le clip vengono usate intere e senza il loro audio. Le clip orizzontali vengono tagliate ai lati.
+Dopo il video, **togli la clip** da `immagini/`, altrimenti viene riusata nel video successivo.
+
 ## Voci arabe disponibili
 
 Cambia `VOCE` in cima a `crea_short.py`:

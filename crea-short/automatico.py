@@ -4,6 +4,10 @@
 2. Pollinations.ai (gratis, senza chiave) genera le 4 immagini verticali
 3. crea_short.py genera la voce araba e monta il video
 
+Strada ibrida: se in immagini/ c'è già una clip fatta a mano (es. 1.mp4 creata con
+l'app Gemini), la clip prende il posto della prima scena e le immagini generate
+sono solo quelle che mancano.
+
 Uso:
   python automatico.py "le api riconoscono i volti umani"
 
@@ -133,17 +137,20 @@ def main() -> None:
     crea_short.FILE_TESTO.write_text(testo, encoding="utf-8")
     print(testo)
 
-    print(f"2/4 Genero {NUMERO_IMMAGINI} immagini (circa 20-30 secondi l'una)...")
     crea_short.CARTELLA_IMMAGINI.mkdir(exist_ok=True)
     metti_da_parte_immagini_vecchie()
+    clip = [p for p in crea_short.trova_media(crea_short.CARTELLA_IMMAGINI) if crea_short.e_clip(p)]
+    if clip:
+        # le clip fatte a mano prendono il posto delle prime scene
+        print(f"   uso le tue clip: {', '.join(p.name for p in clip)}")
+    da_generare = list(enumerate(descrizioni, start=1))[len(clip):]
+
+    print(f"2/4 Genero {len(da_generare)} immagini (circa 20-30 secondi l'una)...")
     seme = int(time.time()) % 1_000_000
-    immagini = []
-    for i, descrizione in enumerate(descrizioni, start=1):
+    for posizione, (i, descrizione) in enumerate(da_generare, start=1):
         print(f"   immagine {i}: {descrizione}")
-        destinazione = crea_short.CARTELLA_IMMAGINI / f"{i}.jpg"
-        scarica_immagine(descrizione, destinazione, seme + i)
-        immagini.append(destinazione)
-        if i < len(descrizioni):
+        scarica_immagine(descrizione, crea_short.CARTELLA_IMMAGINI / f"{i}.jpg", seme + i)
+        if posizione < len(da_generare):
             time.sleep(ATTESA_TRA_TENTATIVI)
 
     print("3/4 Genero la voce...")
@@ -152,7 +159,8 @@ def main() -> None:
     print("4/4 Monto il video...")
     CARTELLA_VIDEO.mkdir(exist_ok=True)
     file_video = CARTELLA_VIDEO / nome_file(argomento)
-    crea_short.monta_video(immagini, crea_short.FILE_VOCE, file_video)
+    media = crea_short.trova_media(crea_short.CARTELLA_IMMAGINI)
+    crea_short.monta_video(media, crea_short.FILE_VOCE, file_video)
     print(f"Fatto: {file_video}")
 
 
