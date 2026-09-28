@@ -109,8 +109,9 @@ def chiedi_a_gemini(argomento: str, chiave: str) -> tuple[str, list[str]]:
             break
         except urllib.error.HTTPError as errore:
             dettaglio = errore.read().decode("utf-8", errors="replace")[:300]
-            if errore.code in (404, 429):
-                # 404: modello ritirato; 429: limite gratuito finito o modello non incluso nel piano gratuito
+            if errore.code in (404, 429, 500, 502, 503, 504):
+                # 404: modello ritirato; 429: limite gratuito finito o modello non incluso nel piano gratuito;
+                # 5xx: modello sovraccarico o problema temporaneo di Google
                 limite_raggiunto |= errore.code == 429
                 print(f"   {modello} non disponibile (errore {errore.code}), provo il prossimo...")
                 continue
@@ -123,7 +124,8 @@ def chiedi_a_gemini(argomento: str, chiave: str) -> tuple[str, list[str]]:
         if limite_raggiunto:
             sys.exit("Gemini: limite gratuito raggiunto su tutti i modelli provati. Riprova tra qualche minuto "
                      "o domani.")
-        sys.exit("Gemini: nessuno dei modelli provati ha funzionato.")
+        sys.exit("Gemini: nessuno dei modelli provati ha funzionato (forse sono tutti sovraccarichi). "
+                 "Riprova tra qualche minuto.")
 
     try:
         contenuto = json.loads(dati["candidates"][0]["content"]["parts"][0]["text"])
