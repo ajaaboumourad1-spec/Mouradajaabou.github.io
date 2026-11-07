@@ -6,6 +6,14 @@
 <meta name="robots" content="noindex, nofollow">
 <meta name="description" content="Scanner documenti interno: scatta o importa foto, ritaglia, migliora e genera PDF. Tutto resta sul dispositivo.">
 <title>Scanner Ufficio</title>
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" type="image/png" sizes="192x192" href="icons/icon-192.png">
+<link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
+<meta name="theme-color" content="#1a63d6">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="Scanner">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <style>
   :root {
     --bg: #f3f4f6;
@@ -219,6 +227,7 @@
   <section class="actions">
     <button id="btnCamera" class="btn primary" type="button"><svg class="i"><use href="#i-camera"/></svg>Scansiona</button>
     <button id="btnImport" class="btn" type="button"><svg class="i"><use href="#i-image"/></svg>Importa immagini</button>
+    <button id="btnInstall" class="btn" type="button" hidden><svg class="i"><use href="#i-pdf"/></svg>Installa app</button>
     <span class="spacer"></span>
     <label class="field-inline" for="defFilter">Filtro nuove pagine
       <select id="defFilter" style="width:auto">
@@ -1200,6 +1209,28 @@
 
   window.addEventListener('beforeunload', function (e) {
     if (pages.length) { e.preventDefault(); e.returnValue = ''; }
+  });
+
+  /* ---------- App installabile / offline ---------- */
+  if ('serviceWorker' in navigator && window.isSecureContext) {
+    window.addEventListener('load', function () {
+      navigator.serviceWorker.register('sw.js').catch(function (err) { console.warn('Service worker non registrato', err); });
+    });
+  }
+  var installEvt = null;
+  window.addEventListener('beforeinstallprompt', function (e) {
+    e.preventDefault();
+    installEvt = e;
+    $('btnInstall').hidden = false;
+  });
+  $('btnInstall').addEventListener('click', function () {
+    if (!installEvt) return;
+    installEvt.prompt();
+    installEvt.userChoice.then(function () { installEvt = null; $('btnInstall').hidden = true; });
+  });
+  window.addEventListener('appinstalled', function () {
+    $('btnInstall').hidden = true;
+    toast('App installata: ora funziona anche offline');
   });
 
   if (!window.jspdf) toast('Attenzione: libreria PDF non caricata', true);
