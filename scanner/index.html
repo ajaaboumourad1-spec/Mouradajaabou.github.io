@@ -580,6 +580,7 @@
         </div>
         <p class="note">I contatti restano salvati solo su questo dispositivo.</p>
       </div>
+      <p class="note" style="text-align:center;margin-top:22px">Scanner Ufficio · versione <b id="appVersion"></b></p>
     </div>
   </div>
 </div>
@@ -657,6 +658,7 @@
   const SIZES = { a4: [210, 297], letter: [215.9, 279.4] };
   const FILTERS = ['enhance', 'color', 'gray', 'bw'];
   const BASE = new URL('.', document.baseURI).href;
+  const VERSION = '3.1 · 19/11/2026';
 
   const store = {
     get(k, def) {
@@ -1106,8 +1108,8 @@
     const res = orderCorners(quad.map((p) => {
       const dx = p.x - cx, dy = p.y - cy, l = Math.hypot(dx, dy) || 1;
       return {
-        x: Math.min(sw, Math.max(0, (p.x + dx / l * 0.7) / sx)),
-        y: Math.min(sh, Math.max(0, (p.y + dy / l * 0.7) / sy))
+        x: Math.min(sw, Math.max(0, (p.x - dx / l * 0.6) / sx)),   // un filo verso l'interno: niente strisce di tavolo
+        y: Math.min(sh, Math.max(0, (p.y - dy / l * 0.6) / sy))
       };
     }));
     return isConvex(res) ? res : null;
@@ -1313,10 +1315,97 @@
     })));
     return isConvex(res) ? res : null;
   }
+  /* Rifinitura: per ogni lato cerca il bordo esatto su un'immagine più grande
+     (passaggio carta chiara -> tavolo scuro) e ci adatta una retta. */
+  function refineEdges(src, sw, sh, quad) {
+    const S = 1000, s = Math.min(1, S / Math.max(sw, sh));
+    const w = Math.max(32, Math.round(sw * s)), h = Math.max(32, Math.round(sh * s));
+    const kx = w / sw, ky = h / sh;
+    const cv = makeCanvas(w, h), cx = ctx2d(cv);
+    cx.drawImage(src, 0, 0, w, h);
+    const d = cx.getImageData(0, 0, w, h).data, n = w * h;
+    let g = new Float32Array(n);
+    for (let i = 0, p = 0; i < n; i++, p += 4) g[i] = 0.299 * d[p] + 0.587 * d[p + 1] + 0.114 * d[p + 2];
+    g = rankFilter(rankFilter(boxBlur(g, w, h, 1), w, h, 3, true), w, h, 3, false);   // via il testo vicino ai bordi
+    const at = (x, y) => {
+      if (x < 0 || y < 0 || x > w - 1 || y > h - 1) return null;
+      const x0 = x | 0, y0 = y | 0, x1 = Math.min(w - 1, x0 + 1), y1 = Math.min(h - 1, y0 + 1), fx = x - x0, fy = y - y0;
+      return g[y0 * w + x0] * (1 - fx) * (1 - fy) + g[y0 * w + x1] * fx * (1 - fy) + g[y1 * w + x0] * (1 - fx) * fy + g[y1 * w + x1] * fx * fy;
+    };
+    const q = quad.map((p) => ({ x: p.x * kx, y: p.y * ky }));
+    let cxm = 0, cym = 0;
+    q.forEach((p) => { cxm += p.x / 4; cym += p.y / 4; });
+    const R = Math.max(6, Math.round(Math.max(w, h) * 0.018));
+    const lines = [];
+    for (let k = 0; k < 4; k++) {
+      const a = q[k], b = q[(k + 1) % 4];
+      let nx = b.y - a.y, ny = a.x - b.x;
+      const nl = Math.hypot(nx, ny) || 1;
+      nx /= nl; ny /= nl;
+      if (((a.x + b.x) / 2 - cxm) * nx + ((a.y + b.y) / 2 - cym) * ny < 0) { nx = -nx; ny = -ny; }
+      const pts = [];
+      for (let i = 0; i < 40; i++) {
+        const t = 0.08 + 0.84 * i / 39, mx = a.x + (b.x - a.x) * t, my = a.y + (b.y - a.y) * t;
+        let best = 0, bestO = null;
+        const der = [];
+        for (let o = -R; o <= R; o++) {
+          const g1 = at(mx + nx * (o - 1), my + ny * (o - 1)), g2 = at(mx + nx * (o + 1), my + ny * (o + 1));
+          der.push(g1 === null || g2 === null ? 0 : g2 - g1);   // negativo: da chiaro (dentro) a scuro (fuori)
+        }
+        for (const v of der) if (v < best) best = v;
+        if (best > -6) continue;
+        for (let j = der.length - 1; j >= 0; j--) if (der[j] <= best * 0.6) { bestO = j - R; break; }   // la transizione più esterna
+        if (bestO !== null) pts.push({ x: mx + nx * bestO, y: my + ny * bestO });
+      }
+      // retta ai minimi quadrati totali, con un secondo passaggio senza punti anomali
+      const fit = (P) => {
+        let mxp = 0, myp = 0;
+        P.forEach((p) => { mxp += p.x / P.length; myp += p.y / P.length; });
+        let sxx = 0, sxy = 0, syy = 0;
+        P.forEach((p) => { const dx = p.x - mxp, dy = p.y - myp; sxx += dx * dx; sxy += dx * dy; syy += dy * dy; });
+        const th = 0.5 * Math.atan2(2 * sxy, sxx - syy);
+        return { x: mxp, y: myp, dx: Math.cos(th), dy: Math.sin(th) };
+      };
+      let L = null;
+      if (pts.length >= 12) {
+        L = fit(pts);
+        const dev = (p) => Math.abs((p.x - L.x) * L.dy - (p.y - L.y) * L.dx);
+        const good = pts.filter((p) => dev(p) <= 2.5);
+        L = good.length >= 10 ? fit(good) : null;
+      }
+      lines.push(L || { x: a.x, y: a.y, dx: (b.x - a.x) / nl, dy: (b.y - a.y) / nl });
+    }
+    const inter = (A, B) => {
+      const det = A.dx * B.dy - A.dy * B.dx;
+      if (Math.abs(det) < 1e-6) return null;
+      const t = ((B.x - A.x) * B.dy - (B.y - A.y) * B.dx) / det;
+      return { x: A.x + A.dx * t, y: A.y + A.dy * t };
+    };
+    const out = [];
+    for (let k = 0; k < 4; k++) {
+      const p = inter(lines[(k + 3) % 4], lines[k]);
+      if (!p || Math.hypot(p.x - q[k].x, p.y - q[k].y) > Math.max(w, h) * 0.04) return quad;   // troppo lontano: tieni il primo risultato
+      out.push(p);
+    }
+    if (!isConvex(out)) return quad;
+    let ox = 0, oy = 0;
+    out.forEach((p) => { ox += p.x / 4; oy += p.y / 4; });
+    return orderCorners(out.map((p) => {
+      const dx = p.x - ox, dy = p.y - oy, l = Math.hypot(dx, dy) || 1;
+      return {   // 1 px verso l'interno sull'immagine di lavoro
+        x: Math.min(sw, Math.max(0, (p.x - dx / l * 1.0) / kx)),
+        y: Math.min(sh, Math.max(0, (p.y - dy / l * 1.0) / ky))
+      };
+    }));
+  }
   function detectQuad(src, sw, sh, size) {
-    const q = detectQuadBright(src, sw, sh, size) || detectQuadEdges(src, sw, sh, size ? Math.min(size, 400) : 320);
+    let q = detectQuadBright(src, sw, sh, size) || detectQuadEdges(src, sw, sh, size ? Math.min(size, 400) : 320);
     // Se copre quasi tutta l'immagine il documento riempie già l'inquadratura: nessun ritaglio
-    return q && polyArea(q) < sw * sh * 0.96 ? q : null;
+    if (!q || polyArea(q) >= sw * sh * 0.96) return null;
+    if (size) {   // scatto o foto importata: precisione al pixel (l'anteprima dal vivo resta veloce)
+      try { q = refineEdges(src, sw, sh, q); } catch (e) { console.warn(e); }
+    }
+    return q;
   }
 
   /* =========================================================
@@ -1542,6 +1631,7 @@
     let corners = null;
     if (o.detect && settings.autoDetect) {
       try { corners = detectQuad(c, c.width, c.height, 400); } catch (e) { console.warn(e); }
+      if (!corners) toast('Bordi non trovati in automatico: tocca la pagina per sistemarli');
     }
     const blob = await canvasToBlob(c, 'image/jpeg', 0.93);
     const page = {
@@ -2418,7 +2508,7 @@
      ========================================================= */
   if ('serviceWorker' in navigator && window.isSecureContext) {
     window.addEventListener('load', () => {
-      navigator.serviceWorker.register('sw.js').catch((err) => console.warn('Service worker non registrato', err));
+      navigator.serviceWorker.register('sw.js').then((r) => r.update()).catch((err) => console.warn('Service worker non registrato', err));
     });
   }
   let installEvt = null;
@@ -2443,6 +2533,7 @@
 
   /* Avvio */
   $('docName').value = defaultName();
+  $('appVersion').textContent = VERSION;
   if (!window.jspdf) toast('Attenzione: libreria PDF non caricata', true);
   renderAll();
 

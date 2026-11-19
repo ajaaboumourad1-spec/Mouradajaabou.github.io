@@ -1,7 +1,7 @@
 /* Service worker di Scanner Ufficio: rende l'app utilizzabile offline.
    Cambia CACHE (es. scanner-v2) a ogni modifica dei file per forzare l'aggiornamento. */
 'use strict';
-var CACHE = 'scanner-v3';
+var CACHE = 'scanner-v4';
 var ASSETS = [
   './',
   './index.html',
@@ -59,7 +59,7 @@ self.addEventListener('fetch', function (e) {
   if (req.mode === 'navigate') {
     // Rete prima (così gli aggiornamenti arrivano), copia salvata se offline
     e.respondWith(
-      fetch(req).then(function (res) {
+      fetch(req.url, { cache: 'no-cache', credentials: 'same-origin' }).then(function (res) {   // sempre la pagina più recente
         if (res.ok && !res.redirected) {
           var copy = res.clone();
           caches.open(CACHE).then(function (c) { return c.put('./index.html', copy); });
