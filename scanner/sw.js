@@ -1,7 +1,7 @@
 /* Service worker di Scanner Ufficio: rende l'app utilizzabile offline.
    Cambia CACHE (es. scanner-v2) a ogni modifica dei file per forzare l'aggiornamento. */
 'use strict';
-var CACHE = 'scanner-v2';
+var CACHE = 'scanner-v3';
 var ASSETS = [
   './',
   './index.html',

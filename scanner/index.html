@@ -588,6 +588,7 @@
 <div id="camModal" class="full" hidden role="dialog" aria-modal="true" aria-label="Fotocamera">
   <div class="full-bar">
     <h2>Scansiona</h2>
+    <button id="camNative" class="btn small" type="button" title="Usa l'app Fotocamera del telefono: qualità massima"><svg class="i"><use href="#i-camera"/></svg>Foto HD</button>
     <button id="camClose" class="icon-btn" type="button" aria-label="Chiudi"><svg class="i"><use href="#i-x"/></svg></button>
   </div>
   <div id="camStage">
@@ -646,12 +647,12 @@
   /* =========================================================
      Costanti e impostazioni
      ========================================================= */
-  const MAX_SRC = 2600;   // lato massimo dell'immagine memorizzata (px)
+  const MAX_SRC = 3200;   // lato massimo dell'immagine memorizzata (px)
   const THUMB = 360;      // lato massimo della miniatura (px)
   const QUALITY = {
-    high:   { max: 2480, q: 0.90, hint: '~300 dpi, per la stampa' },
-    medium: { max: 1754, q: 0.80, hint: '~200 dpi, consigliata' },
-    low:    { max: 1240, q: 0.65, hint: '~150 dpi, file piccolo per email' }
+    high:   { max: 3000, q: 0.88, hint: '~300 dpi, per la stampa' },
+    medium: { max: 2200, q: 0.82, hint: '~250 dpi, consigliata' },
+    low:    { max: 1500, q: 0.72, hint: '~170 dpi, file piccolo per email' }
   };
   const SIZES = { a4: [210, 297], letter: [215.9, 279.4] };
   const FILTERS = ['enhance', 'color', 'gray', 'bw'];
@@ -1012,7 +1013,7 @@
     }
     return idx.map((i) => H[i]);
   }
-  function detectQuad(src, sw, sh, size) {
+  function detectQuadBright(src, sw, sh, size) {
     if (!sw || !sh) return null;
     const S = size || 256, s = Math.min(1, S / Math.max(sw, sh));
     const w = Math.max(16, Math.round(sw * s)), h = Math.max(16, Math.round(sh * s));
@@ -1112,43 +1113,371 @@
     return isConvex(res) ? res : null;
   }
 
+  /* Filtro di massimo (isMax) o minimo su finestra quadrata, separabile */
+  function rankFilter(src, w, h, r, isMax) {
+    const tmp = new Float32Array(w * h), out = new Float32Array(w * h);
+    for (let y = 0; y < h; y++) {
+      const row = y * w;
+      for (let x = 0; x < w; x++) {
+        let v = src[row + x];
+        for (let k = Math.max(0, x - r); k <= Math.min(w - 1, x + r); k++) {
+          const u = src[row + k];
+          if (isMax ? u > v : u < v) v = u;
+        }
+        tmp[row + x] = v;
+      }
+    }
+    for (let x = 0; x < w; x++) {
+      for (let y = 0; y < h; y++) {
+        let v = tmp[y * w + x];
+        for (let k = Math.max(0, y - r); k <= Math.min(h - 1, y + r); k++) {
+          const u = tmp[k * w + x];
+          if (isMax ? u > v : u < v) v = u;
+        }
+        out[y * w + x] = v;
+      }
+    }
+    return out;
+  }
+  /* Secondo metodo, per fogli su tavoli chiari: cerca i 4 bordi dritti più forti (trasformata di Hough) */
+  function detectQuadEdges(src, sw, sh, size) {
+    if (!sw || !sh) return null;
+    const S = size || 320, s = Math.min(1, S / Math.max(sw, sh));
+    const w = Math.max(32, Math.round(sw * s)), h = Math.max(32, Math.round(sh * s));
+    const cv = makeCanvas(w, h), cx = ctx2d(cv);
+    cx.drawImage(src, 0, 0, w, h);
+    const d = cx.getImageData(0, 0, w, h).data, n = w * h;
+    let g = new Float32Array(n);
+    for (let i = 0, p = 0; i < n; i++, p += 4) g[i] = 0.299 * d[p] + 0.587 * d[p + 1] + 0.114 * d[p + 2];
+    g = boxBlur(boxBlur(g, w, h, 1), w, h, 1);
+    g = rankFilter(rankFilter(g, w, h, 3, true), w, h, 3, false);   // chiusura: cancella il testo scuro e sottile
+    const mag = new Float32Array(n), ang = new Float32Array(n);
+    for (let y = 1; y < h - 1; y++) {
+      for (let x = 1; x < w - 1; x++) {
+        const i = y * w + x;
+        const gx = (g[i - w + 1] + 2 * g[i + 1] + g[i + w + 1]) - (g[i - w - 1] + 2 * g[i - 1] + g[i + w - 1]);
+        const gy = (g[i + w - 1] + 2 * g[i + w] + g[i + w + 1]) - (g[i - w - 1] + 2 * g[i - w] + g[i - w + 1]);
+        mag[i] = Math.hypot(gx, gy);
+        ang[i] = Math.atan2(gy, gx);
+      }
+    }
+    const sorted = Float32Array.from(mag).sort();
+    const thr = Math.max(16, sorted[Math.floor(n * 0.9)]);
+    let edge = new Uint8Array(n);
+    for (let i = 0; i < n; i++) edge[i] = mag[i] > thr ? 1 : 0;
+
+    const NT = 180, diag = Math.ceil(Math.hypot(w, h)), NR = 2 * diag + 1;
+    const cosT = new Float32Array(NT), sinT = new Float32Array(NT);
+    for (let t = 0; t < NT; t++) { cosT[t] = Math.cos(t * Math.PI / 180); sinT[t] = Math.sin(t * Math.PI / 180); }
+    const acc = new Float32Array(NT * NR);
+    for (let y = 1; y < h - 1; y++) {
+      for (let x = 1; x < w - 1; x++) {
+        const i = y * w + x;
+        if (!edge[i]) continue;
+        const t0 = Math.round(((ang[i] * 180 / Math.PI) % 180 + 180) % 180);
+        for (let dt = -3; dt <= 3; dt++) {
+          const t = (t0 + dt + NT) % NT;
+          const r = Math.round(x * cosT[t] + y * sinT[t]) + diag;
+          acc[t * NR + r] += 1;
+        }
+      }
+    }
+    // Picchi separati per linee orizzontali e verticali, così le une non "rubano" posto alle altre
+    const lines = [], minVotes = Math.max(20, 0.12 * Math.min(w, h));
+    const isHz = (t) => t >= 45 && t < 135;
+    for (let k = 0, nh = 0, nv = 0; k < 24 && (nh < 10 || nv < 10); k++) {
+      let bi = -1, bv = minVotes;
+      for (let t = 0; t < NT; t++) {
+        if (isHz(t) ? nh >= 10 : nv >= 10) continue;
+        for (let r = 0, i = t * NR; r < NR; r++, i++) if (acc[i] > bv) { bv = acc[i]; bi = i; }
+      }
+      if (bi < 0) break;
+      if (isHz((bi / NR) | 0)) nh++; else nv++;
+      const t = (bi / NR) | 0, r = (bi % NR) - diag;
+      lines.push({ t, r });
+      for (let dt = -7; dt <= 7; dt++) {
+        let tt = t + dt, rr = r;
+        if (tt < 0) { tt += NT; rr = -r; } else if (tt >= NT) { tt -= NT; rr = -r; }
+        for (let dr = -10; dr <= 10; dr++) {
+          const ri = rr + dr + diag;
+          if (ri >= 0 && ri < NR) acc[tt * NR + ri] = 0;
+        }
+      }
+    }
+    const hz = [], vt = [];
+    for (const L of lines) {
+      const c = cosT[L.t], sn = sinT[L.t];
+      if (L.t >= 45 && L.t < 135) hz.push({ c, s: sn, r: L.r, pos: (L.r - (w / 2) * c) / sn });
+      else vt.push({ c, s: sn, r: L.r, pos: (L.r - (h / 2) * sn) / c });
+    }
+    if (hz.length < 2 || vt.length < 2) return null;
+    hz.sort((a, b) => a.pos - b.pos);
+    vt.sort((a, b) => a.pos - b.pos);
+    const inter = (a, b) => {
+      const det = a.c * b.s - a.s * b.c;
+      if (Math.abs(det) < 1e-6) return null;
+      return { x: (a.r * b.s - a.s * b.r) / det, y: (a.c * b.r - a.r * b.c) / det };
+    };
+    edge = morph(edge, w, h, false);   // tolleranza di 1 px per la verifica dei lati
+    const coverage = (p, q) => {
+      const len = Math.hypot(q.x - p.x, q.y - p.y), m = Math.max(20, Math.round(len / 3));
+      let hit = 0;
+      for (let i = 0; i <= m; i++) {
+        const x = Math.round(p.x + (q.x - p.x) * i / m), y = Math.round(p.y + (q.y - p.y) * i / m);
+        if (x >= 0 && y >= 0 && x < w && y < h && edge[y * w + x]) hit++;
+      }
+      return hit / (m + 1);
+    };
+    // Un vero bordo del foglio ha la carta più chiara dentro e il tavolo più scuro fuori;
+    // i riquadri stampati dentro un documento hanno lo stesso bianco da entrambi i lati.
+    const gAt = (x, y) => {
+      const xi = Math.round(x), yi = Math.round(y);
+      return xi >= 0 && yi >= 0 && xi < w && yi < h ? g[yi * w + xi] : -1;
+    };
+    const sideContrast = (p, q, cxm, cym) => {
+      let nx = q.y - p.y, ny = p.x - q.x;
+      const nl = Math.hypot(nx, ny) || 1;
+      nx /= nl; ny /= nl;
+      const mxp = (p.x + q.x) / 2, myp = (p.y + q.y) / 2;
+      if ((mxp - cxm) * nx + (myp - cym) * ny < 0) { nx = -nx; ny = -ny; }   // normale verso l'esterno
+      let sIn = 0, sOut = 0, m = 0;
+      for (let i = 1; i < 20; i++) {
+        const x = p.x + (q.x - p.x) * i / 20, y = p.y + (q.y - p.y) * i / 20;
+        const a = gAt(x - nx * 5, y - ny * 5), b = gAt(x + nx * 5, y + ny * 5);
+        if (a < 0 || b < 0) continue;
+        sIn += a; sOut += b; m++;
+      }
+      return m < 5 ? null : (sIn - sOut) / m;   // null: lato fuori dall'immagine, non verificabile
+    };
+    // La cornice dell'immagine fuori dal foglio deve essere "tavolo", cioè più scura della carta
+    const inside = (q, x, y) => {
+      let sgn = 0;
+      for (let k = 0; k < 4; k++) {
+        const a = q[k], b = q[(k + 1) % 4];
+        const cr = (b.x - a.x) * (y - a.y) - (b.y - a.y) * (x - a.x);
+        if (cr !== 0) { const sg = cr > 0 ? 1 : -1; if (!sgn) sgn = sg; else if (sg !== sgn) return false; }
+      }
+      return true;
+    };
+    const border = [];
+    for (let x = 2; x < w - 2; x += 2) border.push(x, 2, x, h - 3);
+    for (let y = 2; y < h - 2; y += 2) border.push(2, y, w - 3, y);
+    const frameIsTable = (q) => {
+      const pv = [];
+      for (let i = 1; i < 10; i++) for (let j = 1; j < 10; j++) {
+        const u = i / 10, v = j / 10;
+        const tx = q[0].x + (q[1].x - q[0].x) * u, ty = q[0].y + (q[1].y - q[0].y) * u;
+        const bx = q[3].x + (q[2].x - q[3].x) * u, by = q[3].y + (q[2].y - q[3].y) * u;
+        const val = gAt(tx + (bx - tx) * v, ty + (by - ty) * v);
+        if (val >= 0) pv.push(val);
+      }
+      if (pv.length < 20) return false;
+      pv.sort((a, b) => a - b);
+      const paper = pv[Math.floor(pv.length / 2)];
+      let sum = 0, m = 0;
+      for (let i = 0; i < border.length; i += 2) {
+        const x = border[i], y = border[i + 1];
+        if (!inside(q, x, y)) { sum += g[y * w + x]; m++; }
+      }
+      return m < 20 || sum / m <= paper - 6;
+    };
+    const mx = w * 0.03, my = h * 0.03;
+    let best = null, bestScore = 0;
+    for (let a = 0; a < hz.length; a++) for (let b = a + 1; b < hz.length; b++) {
+      if (hz[b].pos - hz[a].pos < h * 0.2) continue;
+      for (let l = 0; l < vt.length; l++) for (let r = l + 1; r < vt.length; r++) {
+        if (vt[r].pos - vt[l].pos < w * 0.2) continue;
+        const q = [inter(hz[a], vt[l]), inter(hz[a], vt[r]), inter(hz[b], vt[r]), inter(hz[b], vt[l])];
+        if (q.some((p) => !p || p.x < -mx || p.y < -my || p.x > w + mx || p.y > h + my)) continue;
+        if (!isConvex(q)) continue;
+        const area = polyArea(q);
+        if (area < n * 0.12) continue;
+        const cov = [coverage(q[0], q[1]), coverage(q[1], q[2]), coverage(q[2], q[3]), coverage(q[3], q[0])];
+        const minC = Math.min(...cov), meanC = (cov[0] + cov[1] + cov[2] + cov[3]) / 4;
+        if (minC < 0.35) continue;
+        const cxm = (q[0].x + q[1].x + q[2].x + q[3].x) / 4, cym = (q[0].y + q[1].y + q[2].y + q[3].y) / 4;
+        let okSides = true;
+        for (let k = 0; k < 4 && okSides; k++) {
+          const dc = sideContrast(q[k], q[(k + 1) % 4], cxm, cym);
+          if (dc !== null && dc < 4) okSides = false;
+        }
+        if (!okSides || !frameIsTable(q)) continue;
+        const score = area * meanC * meanC;
+        if (score > bestScore) { bestScore = score; best = q; }
+      }
+    }
+    if (!best) return null;
+    const res = orderCorners(best.map((p) => ({
+      x: Math.min(sw, Math.max(0, p.x * sw / w)),
+      y: Math.min(sh, Math.max(0, p.y * sh / h))
+    })));
+    return isConvex(res) ? res : null;
+  }
+  function detectQuad(src, sw, sh, size) {
+    const q = detectQuadBright(src, sw, sh, size) || detectQuadEdges(src, sw, sh, size ? Math.min(size, 400) : 320);
+    // Se copre quasi tutta l'immagine il documento riempie già l'inquadratura: nessun ritaglio
+    return q && polyArea(q) < sw * sh * 0.96 ? q : null;
+  }
+
   /* =========================================================
      Filtri
      ========================================================= */
-  function levels(hist, total) {
-    let lo = 0, hi = 255, acc = 0;
-    const loT = total * 0.01, hiT = total * 0.96;
-    for (let i = 0; i < 256; i++) { acc += hist[i]; if (acc >= loT) { lo = i; break; } }
-    acc = 0;
-    for (let i = 0; i < 256; i++) { acc += hist[i]; if (acc >= hiT) { hi = i; break; } }
-    if (hi - lo < 32) return null;
-    const lut = new Uint8ClampedArray(256), k = 255 / (hi - lo);
-    for (let i = 0; i < 256; i++) lut[i] = (i - lo) * k;
+  /* Stima dello sfondo (la carta) su una griglia di celle e lo porta a bianco:
+     toglie ombre, luce gialla e carta grigia, lasciando testo, timbri, firme e loghi. */
+  function flattenLight(d, W, H) {
+    const cell = Math.max(6, Math.round(Math.max(W, H) / 120));
+    const gw = Math.ceil(W / cell), gh = Math.ceil(H / cell), gn = gw * gh;
+    const colCell = new Int32Array(W);
+    for (let x = 0; x < W; x++) colCell[x] = (x / cell) | 0;
+    // 1) luminosità media di ogni cella
+    const sumL = new Float32Array(gn), cnt = new Float32Array(gn);
+    for (let y = 0, p = 0; y < H; y++) {
+      const rb = ((y / cell) | 0) * gw;
+      for (let x = 0; x < W; x++, p += 4) {
+        const k = rb + colCell[x];
+        sumL[k] += d[p] * 0.299 + d[p + 1] * 0.587 + d[p + 2] * 0.114;
+        cnt[k]++;
+      }
+    }
+    for (let k = 0; k < gn; k++) sumL[k] /= cnt[k] || 1;
+    // 2) colore della carta = media dei pixel più chiari della media (esclude il testo)
+    const R = new Float32Array(gn), G = new Float32Array(gn), B = new Float32Array(gn), C = new Float32Array(gn);
+    for (let y = 0, p = 0; y < H; y++) {
+      const rb = ((y / cell) | 0) * gw;
+      for (let x = 0; x < W; x++, p += 4) {
+        const k = rb + colCell[x];
+        if (d[p] * 0.299 + d[p + 1] * 0.587 + d[p + 2] * 0.114 >= sumL[k]) {
+          R[k] += d[p]; G[k] += d[p + 1]; B[k] += d[p + 2]; C[k]++;
+        }
+      }
+    }
+    const L = new Float32Array(gn);
+    for (let k = 0; k < gn; k++) {
+      const c = C[k] || 1;
+      R[k] /= c; G[k] /= c; B[k] /= c;
+      L[k] = R[k] * 0.299 + G[k] * 0.587 + B[k] * 0.114;
+    }
+    // 3) celle "non carta" (loghi pieni, foto, bordi scuri): più scure dei vicini
+    const valid = new Uint8Array(gn), RAD = 4;
+    let nValid = 0;
+    for (let gy = 0; gy < gh; gy++) {
+      for (let gx = 0; gx < gw; gx++) {
+        let mx = 0;
+        for (let yy = Math.max(0, gy - RAD); yy <= Math.min(gh - 1, gy + RAD); yy++)
+          for (let xx = Math.max(0, gx - RAD); xx <= Math.min(gw - 1, gx + RAD); xx++)
+            if (L[yy * gw + xx] > mx) mx = L[yy * gw + xx];
+        const k = gy * gw + gx;
+        if (L[k] >= 40 && L[k] >= mx * 0.72) { valid[k] = 1; nValid++; }
+      }
+    }
+    if (nValid < gn * 0.15) return false;   // nessuna carta riconoscibile: non toccare
+    // 4) riempie le celle non valide con la media delle vicine valide
+    for (let iter = 0; iter < gw + gh && nValid < gn; iter++) {
+      const add = [];
+      for (let gy = 0; gy < gh; gy++) {
+        for (let gx = 0; gx < gw; gx++) {
+          const k = gy * gw + gx;
+          if (valid[k]) continue;
+          let r = 0, g = 0, b = 0, m = 0;
+          for (let yy = Math.max(0, gy - 1); yy <= Math.min(gh - 1, gy + 1); yy++)
+            for (let xx = Math.max(0, gx - 1); xx <= Math.min(gw - 1, gx + 1); xx++) {
+              const q = yy * gw + xx;
+              if (valid[q]) { r += R[q]; g += G[q]; b += B[q]; m++; }
+            }
+          if (m) add.push(k, r / m, g / m, b / m);
+        }
+      }
+      if (!add.length) break;
+      for (let i = 0; i < add.length; i += 4) {
+        const k = add[i]; R[k] = add[i + 1]; G[k] = add[i + 2]; B[k] = add[i + 3]; valid[k] = 1; nValid++;
+      }
+    }
+    // 5) leggera sfumatura della griglia
+    const smooth = (A) => {
+      const o = new Float32Array(gn);
+      for (let gy = 0; gy < gh; gy++)
+        for (let gx = 0; gx < gw; gx++) {
+          let sum = 0, m = 0;
+          for (let yy = Math.max(0, gy - 1); yy <= Math.min(gh - 1, gy + 1); yy++)
+            for (let xx = Math.max(0, gx - 1); xx <= Math.min(gw - 1, gx + 1); xx++) { sum += A[yy * gw + xx]; m++; }
+          o[gy * gw + gx] = sum / m;
+        }
+      return o;
+    };
+    const Rs = smooth(smooth(R)), Gs = smooth(smooth(G)), Bs = smooth(smooth(B));
+    // 6) divisione per lo sfondo, interpolato in modo bilineare tra i centri delle celle
+    const cx0 = new Int32Array(W), cx1 = new Int32Array(W), cfx = new Float32Array(W);
+    for (let x = 0; x < W; x++) {
+      let f = (x + 0.5) / cell - 0.5;
+      f = Math.min(gw - 1, Math.max(0, f));
+      cx0[x] = f | 0; cx1[x] = Math.min(gw - 1, cx0[x] + 1); cfx[x] = f - cx0[x];
+    }
+    for (let y = 0, p = 0; y < H; y++) {
+      let f = (y + 0.5) / cell - 0.5;
+      f = Math.min(gh - 1, Math.max(0, f));
+      const y0 = f | 0, y1 = Math.min(gh - 1, y0 + 1), fy = f - y0, r0 = y0 * gw, r1 = y1 * gw;
+      for (let x = 0; x < W; x++, p += 4) {
+        const a = r0 + cx0[x], b = r0 + cx1[x], c = r1 + cx0[x], e = r1 + cx1[x], fx = cfx[x];
+        const w00 = (1 - fx) * (1 - fy), w10 = fx * (1 - fy), w01 = (1 - fx) * fy, w11 = fx * fy;
+        const br = Rs[a] * w00 + Rs[b] * w10 + Rs[c] * w01 + Rs[e] * w11;
+        const bg = Gs[a] * w00 + Gs[b] * w10 + Gs[c] * w01 + Gs[e] * w11;
+        const bb = Bs[a] * w00 + Bs[b] * w10 + Bs[c] * w01 + Bs[e] * w11;
+        d[p]     = d[p] * 255 / Math.max(br, 60);
+        d[p + 1] = d[p + 1] * 255 / Math.max(bg, 60);
+        d[p + 2] = d[p + 2] * 255 / Math.max(bb, 60);
+      }
+    }
+    return true;
+  }
+
+  /* Curva tonale: nero più profondo, carta bianca pulita (toglie i puntini grigi) */
+  function toneLut(d, n) {
+    const hist = new Uint32Array(256);
+    for (let i = 0, p = 0; i < n; i++, p += 4) hist[(d[p] * 77 + d[p + 1] * 150 + d[p + 2] * 29) >> 8]++;
+    let bp = 0, acc = 0;
+    for (let i = 0; i < 256; i++) { acc += hist[i]; if (acc >= n * 0.005) { bp = i; break; } }
+    bp = Math.min(bp, 90);
+    const wp = 232, lut = new Uint8ClampedArray(256);
+    for (let i = 0; i < 256; i++) {
+      const t = Math.min(1, Math.max(0, (i - bp) / (wp - bp)));
+      lut[i] = 255 * Math.pow(t, 1.25);
+    }
     return lut;
   }
+
+  /* Nitidezza (maschera di contrasto a croce) sui canali RGB */
+  function sharpen(d, W, H, k) {
+    const s = new Uint8ClampedArray(d), row = W * 4;
+    for (let y = 1; y < H - 1; y++) {
+      for (let x = 1, p = y * row + 4; x < W - 1; x++, p += 4) {
+        for (let c = 0; c < 3; c++) {
+          const i = p + c, v = s[i];
+          d[i] = v + k * (v - (s[i - 4] + s[i + 4] + s[i - row] + s[i + row]) * 0.25);
+        }
+      }
+    }
+  }
+
   function applyFilter(c, filter) {
     if (filter === 'color') return;
     const W = c.width, H = c.height, n = W * H;
     const x = ctx2d(c);
     const img = x.getImageData(0, 0, W, H);
     const d = img.data;
-    const gray = new Uint8Array(n), hist = new Uint32Array(256);
-    for (let i = 0, p = 0; i < n; i++, p += 4) {
-      const L = (d[p] * 77 + d[p + 1] * 150 + d[p + 2] * 29) >> 8;
-      gray[i] = L; hist[L]++;
-    }
+    flattenLight(d, W, H);
     if (filter === 'enhance') {
-      const lut = levels(hist, n);
-      if (!lut) return;
+      const lut = toneLut(d, n);
       for (let p = 0; p < d.length; p += 4) { d[p] = lut[d[p]]; d[p + 1] = lut[d[p + 1]]; d[p + 2] = lut[d[p + 2]]; }
+      sharpen(d, W, H, 0.9);
     } else if (filter === 'gray') {
-      const lg = levels(hist, n);
-      for (let i = 0, p = 0; i < n; i++, p += 4) {
-        const v = lg ? lg[gray[i]] : gray[i];
-        d[p] = d[p + 1] = d[p + 2] = v;
-      }
+      for (let p = 0; p < d.length; p += 4) d[p] = d[p + 1] = d[p + 2] = (d[p] * 77 + d[p + 1] * 150 + d[p + 2] * 29) >> 8;
+      const lut = toneLut(d, n);
+      for (let p = 0; p < d.length; p += 4) d[p] = d[p + 1] = d[p + 2] = lut[d[p]];
+      sharpen(d, W, H, 0.9);
     } else if (filter === 'bw') {
-      // Soglia adattiva (Bradley-Roth) con immagine integrale
+      // Soglia adattiva (Bradley-Roth) con immagine integrale, sull'immagine già normalizzata
+      const gray = new Uint8Array(n);
+      for (let i = 0, p = 0; i < n; i++, p += 4) gray[i] = (d[p] * 77 + d[p + 1] * 150 + d[p + 2] * 29) >> 8;
       const W1 = W + 1, I = new Uint32Array(W1 * (H + 1));
       for (let y = 1; y <= H; y++) {
         let row = 0;
@@ -1166,7 +1495,7 @@
           const cnt = (xb - xa) * (yb - ya);
           const sum = I[yb * W1 + xb] - I[ya * W1 + xb] - I[yb * W1 + xa] + I[ya * W1 + xa];
           const idx = y * W + xx, p = idx << 2;
-          d[p] = d[p + 1] = d[p + 2] = gray[idx] * cnt <= sum * T ? 0 : 255;
+          d[p] = d[p + 1] = d[p + 2] = (gray[idx] * cnt <= sum * T && gray[idx] < 200) ? 0 : 255;
         }
       }
     }
@@ -1736,7 +2065,7 @@
   /* =========================================================
      Fotocamera
      ========================================================= */
-  let stream = null, camShots = 0, detectTimer = null, liveQuad = null;
+  let stream = null, camShots = 0, detectTimer = null, liveQuad = null, imageCapture = null, shotChain = Promise.resolve(), photoChain = Promise.resolve();
 
   function openCamera() {
     if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia || !window.isSecureContext) {
@@ -1745,9 +2074,13 @@
     }
     navigator.mediaDevices.getUserMedia({
       audio: false,
-      video: { facingMode: { ideal: 'environment' }, width: { ideal: 3840 }, height: { ideal: 2160 } }
+      video: { facingMode: { ideal: 'environment' }, width: { ideal: 4096 }, height: { ideal: 3072 } }
     }).then((s) => {
       stream = s;
+      imageCapture = null;
+      const track = s.getVideoTracks()[0];
+      // Dove disponibile (Chrome su Android) si scatta una vera foto alla piena risoluzione del sensore
+      if (track && 'ImageCapture' in window) { try { imageCapture = new window.ImageCapture(track); } catch (_) { imageCapture = null; } }
       camShots = 0;
       updateCamCount(null);
       const v = $('camVideo');
@@ -1768,6 +2101,7 @@
     clearTimeout(detectTimer);
     detectTimer = null;
     liveQuad = null;
+    imageCapture = null;
     if (stream) { stream.getTracks().forEach((t) => t.stop()); stream = null; }
     $('camVideo').srcObject = null;
     $('camModal').hidden = true;
@@ -1820,19 +2154,45 @@
   }
   $('camVideo').addEventListener('loadedmetadata', placeOverlay);
   $('camClose').addEventListener('click', closeCamera);
-  $('camDone').addEventListener('click', closeCamera);
+  $('camDone').addEventListener('click', () => {
+    // Aspetta le foto ancora in arrivo dal sensore prima di spegnere la fotocamera
+    busy(true, 'Salvo gli scatti…');
+    photoChain.then(() => { busy(false); closeCamera(); });
+  });
+  const timeout = (ms) => new Promise((_, rej) => setTimeout(() => rej(new Error('timeout')), ms));
+  async function grabPhoto(v, frame) {
+    if (!imageCapture) return null;
+    try {
+      const blob = await Promise.race([imageCapture.takePhoto(), timeout(5000)]);
+      const img = await loadImage(blob);
+      const w = img.naturalWidth, h = img.naturalHeight;
+      // Usa la foto solo se è davvero più grande e orientata come l'anteprima (niente rotazioni a caso)
+      if ((h > w) === (frame.height > frame.width) && Math.max(w, h) > Math.max(frame.width, frame.height) * 1.1) return img;
+    } catch (e) { console.warn('takePhoto non disponibile, uso il fotogramma', e); }
+    return null;
+  }
   $('camShoot').addEventListener('click', () => {
     const v = $('camVideo');
     if (!v.videoWidth || !v.videoHeight) { toast('Fotocamera non ancora pronta'); return; }
     const fl = $('flash');
     fl.classList.add('on');
     requestAnimationFrame(() => requestAnimationFrame(() => fl.classList.remove('on')));
-    const c = scaleToCanvas(v, v.videoWidth, v.videoHeight, MAX_SRC);
+    const frame = scaleToCanvas(v, v.videoWidth, v.videoHeight, MAX_SRC);   // riserva, preso subito
     camShots++;
     updateCamCount(null);
-    addFromSource(c, c.width, c.height, { detect: true })
-      .then((p) => { if (p && p.thumbUrl && stream) updateCamCount(p.thumbUrl); })
-      .catch((err) => toast(err.message, true));
+    // In coda, così le pagine restano nell'ordine degli scatti
+    const grab = photoChain = photoChain.then(() => grabPhoto(v, frame)).catch(() => null);
+    shotChain = shotChain.then(async () => {
+      const img = await grab;
+      const p = img
+        ? await addFromSource(img, img.naturalWidth, img.naturalHeight, { detect: true })
+        : await addFromSource(frame, frame.width, frame.height, { detect: true });
+      if (p && p.thumbUrl && stream) updateCamCount(p.thumbUrl);
+    }).catch((err) => toast(err.message, true));
+  });
+  $('camNative').addEventListener('click', () => {
+    closeCamera();
+    $('cameraInput').click();
   });
 
   /* =========================================================
@@ -2088,7 +2448,7 @@
 
   /* Solo per i test automatici in locale */
   if (location.hostname === 'localhost' && /[?&]test\b/.test(location.search)) {
-    window.__scanner = { detectQuad, pages: () => pages };
+    window.__scanner = { detectQuad, detectQuadBright, detectQuadEdges, applyFilter, pages: () => pages };
   }
 })();
 </script>
